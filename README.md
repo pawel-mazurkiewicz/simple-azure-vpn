@@ -1,8 +1,8 @@
 # Simple Azure VPN
 [![Build Status](https://travis-ci.org/mazur92/simple-azure-vpn.svg?branch=master)](https://travis-ci.org/mazur92/simple-azure-vpn)
 ## Prerequisites
-* Terraform 0.10.8<
-* Ansible 2.4<
+* Terraform v1.0.0 or later (compatible with AzureRM provider v3.x)
+* Ansible 2.10+ (or Ansible Core 2.10+)
 * Microsoft Azure account (You may register at https://azure.microsoft.com/en-us/free/)
 * Some OpenVPN client (eg. Tunnelblick for macOS)
 
@@ -78,7 +78,7 @@ Please be aware that currently Azure Free Trial allows **15GB** of transfer **ou
 
 ## Note about hardening
 
-The VPN server created here by default blocks ALL incoming connections, apart from SSH and OpenVPN. It's also configured to be automatically updated once in a while and fail2ban is installed. After that CIS role from Ansible Galaxy is run over the server to comply with standards.
+The VPN server created here by default blocks ALL incoming connections, apart from SSH and OpenVPN. It's also configured to be automatically updated once in a while and fail2ban is installed. The server is deployed on Ubuntu 22.04 LTS. A CIS compliance role (e.g., `ansible-lockdown.ubuntu22-cis` from Ansible Galaxy, though you should verify this role's availability or select a current alternative for Ubuntu 22.04) is then applied to further harden the system according to security benchmarks.
 
 ## Disclaimer
 

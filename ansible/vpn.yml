@@ -6,8 +6,5 @@
       tags: base
     - role: openvpn
       tags: openvpn
-    - role: florianutz.Ubuntu1604-CIS 
-      ubuntu1604cis_is_router: true
-      ubuntu1604cis_rule_3_4_2: false
-      ubuntu1604cis_rule_3_4_3: false
+    - role: ansible-lockdown.ubuntu22-cis # Placeholder, actual role might differ
       tags: cis, hardening

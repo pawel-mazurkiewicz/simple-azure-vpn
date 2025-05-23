@@ -5,71 +5,139 @@
     update_cache: yes
   become: true
 
-- name: Create CA directory
-  command: make-cadir /home/{{admin_user}}/openvpn-ca
-  become: "{{admin_user}}"
-  args:
-    creates: /home/{{admin_user}}/openvpn-ca
+- name: Create Easy-RSA working directory
+  file:
+    path: /home/{{ admin_user }}/easy-rsa
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: 0700
 
-- name: Edit vars
+- name: Copy Easy-RSA scripts
+  command: cp -r /usr/share/easy-rsa/* /home/{{ admin_user }}/easy-rsa/
+  args:
+    creates: /home/{{ admin_user }}/easy-rsa/easyrsa # Check for a specific file to ensure idempotency
+  become: "{{ admin_user }}" # Should be admin_user to own the files
+
+- name: Template Easy-RSA vars file
   template:
     src: vars.j2
-    dest: /home/{{admin_user}}/openvpn-ca/vars
-    owner: "{{admin_user}}"
-    group: "{{admin_user}}"
+    dest: /home/{{ admin_user }}/easy-rsa/vars
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
     mode: 0644
   tags:
     - rebuild-root-ca
 
-- name: Copy build CA script
-  copy:
-    src: build_ca.sh
-    dest: /home/{{admin_user}}/openvpn-ca
-    owner: "{{admin_user}}"
-    group: "{{admin_user}}"
-    mode: 0770
-
-- name: Ensure clean environment and build CA, certs and DH params
-  shell: ./build_ca.sh "{{ key_name }}"
+- name: Initialize PKI
+  shell: ./easyrsa init-pki
   args:
-    chdir: /home/{{admin_user}}/openvpn-ca
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki # This creates the pki directory
+  become: "{{ admin_user }}"
   tags:
     - rebuild-root-ca
     - clean-ca
 
-- name: Strengthen server's TLS integrity verification
-  command: openvpn --genkey --secret keys/ta.key
+- name: Build CA certificate
+  shell: ./easyrsa build-ca nopass
   args:
-    chdir: /home/{{admin_user}}/openvpn-ca
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki/ca.crt
+  become: "{{ admin_user }}"
+  environment: # vars file might set these, or pass them directly if easier
+    EASYRSA_REQ_COUNTRY: "{{ easyrsa_req_country | default('US') }}"
+    EASYRSA_REQ_PROVINCE: "{{ easyrsa_req_province | default('CA') }}"
+    EASYRSA_REQ_CITY: "{{ easyrsa_req_city | default('SanFrancisco') }}"
+    EASYRSA_REQ_ORG: "{{ easyrsa_req_org | default('Copyleft') }}"
+    EASYRSA_REQ_EMAIL: "{{ easyrsa_req_email | default('me@example.net') }}"
+    EASYRSA_REQ_OU: "{{ easyrsa_req_ou | default('MyOrganizationalUnit') }}"
+    EASYRSA_KEY_SIZE: "{{ easyrsa_key_size | default(2048) }}"
+    EASYRSA_ALGO: "{{ easyrsa_algo | default('rsa') }}"
+    EASYRSA_CA_EXPIRE: "{{ easyrsa_ca_expire | default(3650) }}"
+    EASYRSA_CERT_EXPIRE: "{{ easyrsa_cert_expire | default(3650) }}"
+    EASYRSA_BATCH: "yes" # Ensures no interactive prompts if vars are set
+  tags:
+    - rebuild-root-ca
+    - clean-ca
 
-- name: Copy client_key_cert script
-  copy:
-    src: client_key_cert.sh
-    dest: /home/{{admin_user}}/openvpn-ca
-    owner: "{{admin_user}}"
-    group: "{{admin_user}}"
-    mode: 0770
-
-- name: Create clients' keys and certs
-  shell: ./client_key_cert.sh "{{ item }}"
+- name: Generate Diffie-Hellman parameters
+  shell: ./easyrsa gen-dh
   args:
-    chdir: /home/{{admin_user}}/openvpn-ca
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki/dh.pem # EasyRSA 3 uses dh.pem not dh2048.pem by default
+  become: "{{ admin_user }}"
+  tags:
+    - rebuild-root-ca
+
+- name: Generate server request and key
+  shell: ./easyrsa gen-req {{ key_name }} nopass
+  args:
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki/private/{{ key_name }}.key
+  become: "{{ admin_user }}"
+  environment:
+    EASYRSA_BATCH: "yes"
+  tags:
+    - rebuild-root-ca
+
+- name: Sign server request
+  shell: ./easyrsa sign-req server {{ key_name }}
+  args:
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki/issued/{{ key_name }}.crt
+  become: "{{ admin_user }}"
+  environment:
+    EASYRSA_BATCH: "yes"
+  tags:
+    - rebuild-root-ca
+
+- name: Strengthen server's TLS integrity verification (generate ta.key)
+  command: openvpn --genkey --secret ta.key # Will be created in chdir
+  args:
+    chdir: /home/{{ admin_user }}/easy-rsa/pki # Place it within pki for consistency
+    creates: ta.key # Check relative to chdir
+  become: "{{ admin_user }}" # admin_user can create this file in their own dir
+
+- name: Generate client requests and keys
+  shell: ./easyrsa gen-req {{ item }} nopass
+  args:
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki/private/{{ item }}.key
+  become: "{{ admin_user }}"
   with_items: "{{ vpn_users }}"
+  environment:
+    EASYRSA_BATCH: "yes"
   tags:
     - regenerate-clients
 
-- name: Copy CA files to OpenVPN dir
+- name: Sign client requests
+  shell: ./easyrsa sign-req client {{ item }}
+  args:
+    chdir: /home/{{ admin_user }}/easy-rsa
+    creates: pki/issued/{{ item }}.crt
+  become: "{{ admin_user }}"
+  with_items: "{{ vpn_users }}"
+  environment:
+    EASYRSA_BATCH: "yes"
+  tags:
+    - regenerate-clients
+
+- name: Copy generated files to OpenVPN directory
   become: true
   copy:
-    src: /home/{{admin_user}}/openvpn-ca/keys/{{item}}
-    dest: /etc/openvpn
+    src: /home/{{ admin_user }}/easy-rsa/{{ item.src }}
+    dest: /etc/openvpn/{{ item.dest | default(item.src | basename) }}
     remote_src: yes
+    owner: root
+    group: root
+    mode: 0600 # Keys should be private
   with_items:
-    - ca.crt
-    - ta.key
-    - dh2048.pem
-    - "{{ key_name }}.crt"
-    - "{{ key_name }}.key"
+    - { src: 'pki/ca.crt' }
+    - { src: 'pki/ta.key' } # Assuming ta.key is now in pki/
+    - { src: 'pki/dh.pem', dest: 'dh.pem' } # Explicitly name it dh.pem in /etc/openvpn
+    - { src: 'pki/issued/{{ key_name }}.crt' }
+    - { src: 'pki/private/{{ key_name }}.key', mode: '0600' } # Ensure private key has strict perms
   tags:
     - rebuild-root-ca
 
@@ -94,8 +162,9 @@
     - firewall
 
 - name: Get default network interface
-  shell: ip route | grep default | awk {'print $5'}
-  register: def_inet
+  set_fact:
+    def_inet_interface: "{{ ansible_default_ipv4.interface }}"
+  when: ansible_default_ipv4.interface is defined
   tags:
     - firewall
   
@@ -110,8 +179,8 @@
         # NAT table rules
         *nat
         :POSTROUTING ACCEPT [0:0] 
-        # Allow traffic from OpenVPN client to {{ def_inet.stdout }}
-        -A POSTROUTING -s 10.8.0.0/8 -o {{ def_inet.stdout }} -j MASQUERADE
+        # Allow traffic from OpenVPN client to {{ def_inet_interface }}
+        -A POSTROUTING -s 10.8.0.0/8 -o {{ def_inet_interface }} -j MASQUERADE
         COMMIT
         # END OPENVPN RULES
   tags:
